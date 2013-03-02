@@ -1,0 +1,328 @@
+<?php
+/**
+ * Implements hook_menu().
+ */
+function redis_misc_menu() {
+  $items['news/news'] = array(
+    'title' => 'News',
+    'description' => 'News.',
+    'page callback' => 'redis_misc_news_page',
+    'access callback' => TRUE,
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_menu_alter().
+ */
+function redis_misc_menu_alter(&$items) {
+  $items['node/%node']['page callback'] = 'redis_misc_news_item_page';
+}
+
+/**
+ * Implement hook_theme.
+ */
+function redis_misc_theme() {
+  return array(
+    'news_page' => array(
+      'variables' => array(
+        'content' => NULL,
+        'news' => NULL,
+      ),
+      'template' => 'news_page',
+      'path' => drupal_get_path('module', 'redis_misc') . '/template',
+    ),
+  );
+}
+
+function redis_misc_queue() {
+  db_truncate('redis_ssi_queue')->execute();
+  $redis_queue = redis_ssi_queue_get();
+  $results = db_query("SELECT n.nid FROM {node} n", array())->fetchCol();
+  foreach ($results as $nid) {
+    $redis_queue->createItem('page', url("node/$nid"));
+  }
+}
+
+
+function redis_misc_regenerate_page($debug = FALSE) {
+  $queue = redis_ssi_queue_get();
+  $n = variable_get('redis_ssi_regenerate_count', 2);
+  $start = time();
+  $curl_handlers = array();
+  $curl_multi_handler = curl_multi_init();
+  $paths = array();
+  $items = array();
+  while (--$n && ($item = $queue->claimPageItem())) {
+    if (empty($item)) {
+      return TRUE;
+    }
+    $paths[] = $item->object_id;
+    $items[$item->object_id] = $item;
+  }
+  // Iterate each of the URLs on the queue.
+  foreach ($paths as $path) {
+    $ch = curl_init();
+    // Add the URL, user-agent, etc.
+    $curl_options = variable_get('redis_ssi_curl_options', array());
+    $curl_options += array(
+      CURLOPT_URL => url(variable_get('redis_regen_cache') . $path, array('external' => TRUE)),
+      // We should never cache the content of a redirect because redirects are cached elsewhere.
+      CURLOPT_FOLLOWLOCATION => variable_get('player_cache_curlopt_followlocation', FALSE),
+      CURLOPT_RETURNTRANSFER => 1,
+      CURLOPT_USERAGENT => REDIS_SSI_USER_AGENT,
+    );
+    curl_setopt_array($ch, $curl_options);
+
+    // Add the handler to a multi-exec handler.
+    curl_multi_add_handle($curl_multi_handler, $ch);
+
+    // Track the handler so it can be subsequently closed.
+    $curl_handlers[] = curl_init();
+  }
+
+  // Now the curl multi-handler is prepared, execute the requests.
+  do {
+    // This loop is only necessary for libcurl earlier than 7.20.0, however
+    // RHEL 5 has just that. Otherwise a simple call would do.
+    do {
+      // This loop can take a long time so return if it is exceeding the pcq total timeout.
+      if (time() - REQUEST_TIME > drush_get_option('timeout', 55)) {
+        watchdog('PCQ Regen', 'Timeout for PCQ exceeded in curl multi exec.', array(), WATCHDOG_WARNING);
+        return TRUE;
+      }
+      $multi_result = curl_multi_exec($curl_multi_handler, $active);
+    } while ($multi_result == CURLM_CALL_MULTI_PERFORM);
+
+    // Block until there is  activity on any of the handlers. Avoids
+    // busywaiting.
+    if ($multi_result == CURLM_OK) {
+      $select_result = curl_multi_select($curl_multi_handler);
+    }
+
+    if ($multi_result != CURLM_OK || $select_result == -1) {
+      // @TODO: error handling. Something truly awkward happened.
+      return FALSE;
+    }
+  } while ($select_result != -1 && $active && $multi_result == CURLM_OK);
+
+  // Each of the curl requests have completed; log the results.
+  while ($ch_response = curl_multi_info_read($curl_multi_handler)) {
+    // Look up the page URL from the handle.
+    $page_url = curl_getinfo($ch_response['handle'], CURLINFO_EFFECTIVE_URL);
+    $http_code = curl_getinfo($ch_response['handle'], CURLINFO_HTTP_CODE);
+    if ($ch_response['result'] == CURLE_OK) {
+      if (intval($http_code) != 200) {
+        redis_misc_release_item($queue, $items, $page_url);
+      }
+      // No need to use t(); it's handled within the watchdog call.
+      $message = 'Regen request successful for %page_url.';
+      $watchdog_severity = WATCHDOG_DEBUG;
+    }
+    else {
+      redis_misc_release_item($queue, $items, $page_url);
+      $message = 'Curl request failed for %page_url with curl error-code @curl_response_code.';
+      $watchdog_severity = WATCHDOG_WARNING;
+    }
+  }
+
+  // Close all the curl handlers.
+  foreach ($curl_handlers as $curl_handler) {
+    curl_multi_remove_handle($curl_multi_handler, $curl_handler);
+    curl_close($curl_handler);
+  }
+  curl_multi_close($curl_multi_handler);
+
+  foreach ($items as $item) {
+    $queue->deleteItem($item);
+  }
+  return $paths;
+}
+
+
+function redis_misc_release_item($queue, &$items, $path_url) {
+  $path_url = drupal_substr($path_url, drupal_strlen(url(variable_get('redis_misc_cache'))));
+  foreach ($items as $item) {
+    if ($item->object_id == $path_url) {
+      $queue->releaseItem($item);
+      unset($items[$item->object_id]);
+      break;
+    }
+  }
+}
+
+function redis_misc_entity_info_alter(&$entity_info) {
+  $entity_info['node']['view modes']['news_item'] = array(
+    'label' => t('News Item'),
+    'custom settings' => TRUE,
+  );
+  $entity_info['node']['view modes']['news_feed_item'] = array(
+    'label' => t('News Feed Item'),
+    'custom settings' => TRUE,
+  );
+  $entity_info['node']['view modes']['news_full'] = array(
+    'label' => t('News Full'),
+    'custom settings' => TRUE,
+  );
+}
+
+/**
+ * Implements hook_preprocess_node().
+ */
+function redis_misc_preprocess_node(&$vars) {
+  $date = new DateTime('@' . $vars['node']->created);
+  $vars['pub_date'] = $date->format('d/m/y H:i');
+  if($vars['view_mode'] == 'news_item') {
+    $vars['theme_hook_suggestions'] = array('node__' . $vars['type'] . '__news_item');
+    $vars['body'] = $vars['node']->body[LANGUAGE_NONE][0]['value'];
+    $vars['title_link'] = l($vars['title'], 'node/' . $vars['node']->nid);
+  }
+  if($vars['view_mode'] == 'news_full') {
+    $vars['theme_hook_suggestions'] = array('node__' . $vars['type'] . '__news_full');
+    $vars['body'] = $vars['node']->body[LANGUAGE_NONE][0]['value'];
+  }
+  if($vars['view_mode'] == 'news_feed_item') {
+    $vars['theme_hook_suggestions'] = array('node__news__news_feed_item');
+    $vars['body'] = empty($vars['node']->body[LANGUAGE_NONE][0]['value']) ? '' : $vars['node']->body[LANGUAGE_NONE][0]['value'];
+  }
+  if($vars['view_mode'] == 'news_page_item') {
+    $vars['theme_hook_suggestions'] = array('node__news__news_page_item');
+    $vars['body'] = $vars['node']->body[LANGUAGE_NONE][0]['value'];
+  }
+}
+
+function redis_misc_news_page() {
+  $results = db_select('node', 'n')
+    ->fields('n', array('nid'))
+    ->condition('n.type', 'news')
+    ->execute()
+    ->fetchCol();
+  foreach ($results as $nid) {
+    $results_array[] = array(
+      'data' => redis_misc_load_fragment($nid, 'news_item'),
+      'class' => array('news')
+    );
+  }
+  return theme('item_list', array('items' => $results_array));
+}
+
+/**
+ * Load an entity fragment from redis if available if not generate it.
+ */
+function redis_misc_load_fragment($entity_id, $view_type, $regen = TRUE) {
+  $fragment = '';
+  if (variable_get('redis_ssi_disable', FALSE)) {
+    $node = node_load($entity_id);
+    $fragment = redis_ssi_node_fragment($node, $view_type);
+  }
+  else {
+    if ($regen) {
+      $fragment = redis_ssi_client()->hget('node', "$entity_id:$view_type");
+    }
+    if (empty($fragment)) {
+      $node = node_load($entity_id);
+      $fragment = redis_ssi_node_fragment($node, $view_type);
+    }
+  }
+  return $fragment;
+}
+
+function redis_misc_news_item_page($node) {
+  if ($node->type == 'news') {
+    $type = $node->field_news_type[LANGUAGE_NONE][0]['value'];
+    $build['news_page'] = array(
+      '#theme' => 'news_page',
+      '#content' => redis_misc_load_fragment($node->nid, 'news_full'),
+      '#news' => redis_misc_get_segment($type),
+    );
+    return drupal_render($build);
+  }
+}
+
+function redis_misc_test() {
+  $node = node_load(414);
+  $build = node_view($node, 'news_feed_item');
+  return drupal_render($build);
+}
+
+function redis_misc_feeds_after_import($feed) {
+  switch ($feed->id) {
+    case 'news_feed_bbc':
+      redis_misc_feed_process_news('news_item_bbc');
+      break;
+    case 'news_feed_sky':
+      redis_misc_feed_process_news('news_item_sky');
+      break;
+    case 'news_feed_channel_4':
+      redis_misc_feed_process_news('news_item_channel_4');
+      break;
+  }
+}
+
+function redis_misc_get_segment($type, $regen = FALSE) {
+  $segment = '';
+  if (variable_get('redis_ssi_disable', FALSE)) {
+    $segment = redis_misc_load_segment($type);
+  }
+  else {
+    if ($regen) {
+      $segment = redis_misc_load_segment($type);
+      redis_misc_save_segment($type, $segment);
+    }
+    else {
+      $segment = redis_ssi_client()->hget('segment', "$type");
+    }
+  }
+  return $segment;
+}
+
+function redis_misc_load_segment($type) {
+  $news_item_nids = redis_misc_load_segment_sql($type, 5);
+  foreach($news_item_nids as $nid) {
+    $fragments[] = array(
+      'data' => redis_misc_load_fragment($nid, 'news_feed_item'),
+      'class' => array('segment-item'),
+    );
+  }
+  return theme('item_list', array('items' => $fragments));
+}
+
+function redis_misc_load_segment_sql($type, $range) {
+  return db_select('node', 'n')
+    ->fields('n', array('nid'))
+    ->condition('n.type', $type)
+    ->orderBy('n.created', 'DESC')
+    ->range(0, $range)
+    ->execute()
+    ->fetchCol();
+}
+
+function redis_misc_save_segment($type, $segment) {
+  redis_ssi_client()->hset('segment', $type, $segment);
+}
+
+function redis_misc_feed_process_news($type) {
+  redis_misc_get_segment($type, TRUE);
+
+  $nid = db_select('field_data_field_news_type', 'f')
+    ->fields('f', array('entity_id'))
+    ->condition('f.field_news_type_value', $type)
+    ->execute()
+    ->fetchField();
+
+  $news_node = node_load($nid);
+  $news_item_nids = redis_misc_load_segment_sql($type, 3);
+  $body = redis_misc_news_list_segment($news_item_nids);
+  $news_node->body[LANGUAGE_NONE][0]['value'] = $body;
+  node_save($news_node);
+}
+
+function redis_misc_news_list_segment($news_item_nids) {
+  foreach($news_item_nids as $nid) {
+    $fragments[] = array(
+      'data' => redis_misc_load_fragment($nid, 'news_page_item'),
+      'class' => array('segment-list'),
+    );
+  }
+  return theme('item_list', array('items' => $fragments));
+}

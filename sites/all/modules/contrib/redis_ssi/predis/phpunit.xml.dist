@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<phpunit bootstrap="test/bootstrap.php" colors="true" strict="true">
+    <testsuites>
+        <testsuite name="Predis Test Suite">
+            <directory>test/</directory>
+        </testsuite>
+    </testsuites>
+
+    <filter>
+        <whitelist>
+            <directory suffix=".php">lib/Predis/</directory>
+        </whitelist>
+    </filter>
+
+    <php>
+        <const name="TEST_SERVER_VERSION" value="2.2" />
+        <const name="TEST_SERVER_HOST" value="127.0.0.1" />
+        <const name="TEST_SERVER_PORT" value="6379" />
+        <const name="TEST_SERVER_DBNUM" value="15" />
+    </php>
+</phpunit>

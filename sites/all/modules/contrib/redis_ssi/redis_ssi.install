@@ -1,0 +1,104 @@
+<?php
+
+/**
+ * Implements hook_install().
+ */
+function redis_ssi_install() {
+  variable_set('cache_class_redis', 'RedisSSICache');
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function redis_ssi_uninstall() {
+  variable_del('cache_class_redis');
+  variable_del('queue_class_redis_ssi');
+}
+
+/**
+ * Implements hook_schema.
+ */
+function redis_ssi_schema() {
+  $schema['redis_ssi_queue'] = array(
+    'description' => 'Stores items in queues.',
+    'fields' => array(
+      'object_id' => array(
+        'type' => 'varchar',
+        'length' => 255,
+        'default' => '',
+        'not null' => TRUE,
+        'description' => 'The ID of the object the worker is inserting.',
+      ),
+      'object_type' => array(
+        'type' => 'varchar',
+        'length' => 32,
+        'default' => '',
+        'not null' => TRUE,
+        'description' => 'The type of the object the worker is inserting.',
+      ),
+     'item_id' => array(
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'description' => 'Primary Key: Unique item ID.',
+      ),
+      'expire' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Timestamp when the claim lease expires on the item.',
+      ),
+      'created' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Timestamp when the item was created.',
+      ),
+      'weight' => array(
+        'type' => 'int',
+        'size' => 'tiny',
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Timestamp when the item was created.',
+      ),
+      'retry' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Retry count release items.',
+      ),
+    ),
+    'primary key' => array('item_id'),
+    'unique keys' => array(
+      'deduplicate' => array('object_id', 'object_type'),
+    ),
+    'indexes' => array(
+      'expire' => array('expire'),
+      'sorting' => array('retry', 'item_id'),
+    ),
+  );
+  return $schema;
+}
+
+/**
+ * Create a new index to increase SELECT ORDER BY performance.
+ */
+function redis_ssi_update_7001() {
+  db_add_index('redis_ssi_queue', 'sorting', array('object_type','weight','item_id'));
+}
+
+/**
+ * Add a retry column to the redis queue table
+ */
+function redis_ssi_update_7002() {
+  $field = array(
+    'type' => 'int',
+    'not null' => TRUE,
+    'default' => 0,
+    'description' => 'Retry count release items.',
+  );
+  db_add_field('redis_ssi_queue', 'retry', $field);
+  db_drop_index('redis_ssi_queue', 'sorting');
+  db_add_index('redis_ssi_queue', 'sorting', array('retry', 'item_id'));
+}
+

@@ -1,0 +1,7 @@
+name = Redis Misc
+description = Redis Misc
+core = 7.x
+package = Redis Misc
+dependencies[] = redis_ssi
+
+files[] = plugins/FeedsRedisNodeProcessor.inc

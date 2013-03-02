@@ -1,0 +1,6 @@
+name = Redis SSI
+description = Redis SSI tie-in
+core = 7.x
+files[] = redis_ssi.cache.inc
+files[] = redis_ssi.client.inc
+files[] = redis_ssi.queue.inc
