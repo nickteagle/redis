@@ -249,12 +249,15 @@ function redis_misc_feeds_after_import($feed) {
   switch ($feed->id) {
     case 'news_feed_bbc':
       redis_misc_feed_process_news('news_item_bbc');
+      redis_ssi_instantly_regenerate_page('/news/news-bbc');
       break;
     case 'news_feed_sky':
       redis_misc_feed_process_news('news_item_sky');
+      redis_ssi_instantly_regenerate_page('/news/news-sky');
       break;
     case 'news_feed_channel_4':
       redis_misc_feed_process_news('news_item_channel_4');
+      redis_ssi_instantly_regenerate_page('/news/news-channel-4');
       break;
   }
 }
@@ -315,6 +318,7 @@ function redis_misc_feed_process_news($type) {
   $body = redis_misc_news_list_segment($news_item_nids);
   $news_node->body[LANGUAGE_NONE][0]['value'] = $body;
   node_save($news_node);
+  redis_ssi_instantly_regenerate_page('/news/news');
 }
 
 function redis_misc_news_list_segment($news_item_nids) {
