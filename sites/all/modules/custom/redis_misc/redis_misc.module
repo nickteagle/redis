@@ -6,17 +6,32 @@ function redis_misc_menu() {
   $items['news/news'] = array(
     'title' => 'News',
     'description' => 'News.',
-    'page callback' => 'redis_misc_news_page',
+    'page callback' => 'redis_misc_news_list_page',
     'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['news/news-bbc'] = array(
+    'title' => 'BBC News',
+    'description' => 'BBC News.',
+    'page callback' => 'redis_misc_news_item_page',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['news/news-sky'] = array(
+    'title' => 'SKY News',
+    'description' => 'SKY News.',
+    'page callback' => 'redis_misc_news_item_page',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['news/news-channel-4'] = array(
+    'title' => 'Channel 4 News',
+    'description' => 'Channel 4 News.',
+    'page callback' => 'redis_misc_news_item_page',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
   );
   return $items;
-}
-
-/**
- * Implements hook_menu_alter().
- */
-function redis_misc_menu_alter(&$items) {
-  $items['node/%node']['page callback'] = 'redis_misc_news_item_page';
 }
 
 /**
@@ -35,122 +50,9 @@ function redis_misc_theme() {
   );
 }
 
-function redis_misc_queue() {
-  db_truncate('redis_ssi_queue')->execute();
-  $redis_queue = redis_ssi_queue_get();
-  $results = db_query("SELECT n.nid FROM {node} n", array())->fetchCol();
-  foreach ($results as $nid) {
-    $redis_queue->createItem('page', url("node/$nid"));
-  }
-}
-
-
-function redis_misc_regenerate_page($debug = FALSE) {
-  $queue = redis_ssi_queue_get();
-  $n = variable_get('redis_ssi_regenerate_count', 2);
-  $start = time();
-  $curl_handlers = array();
-  $curl_multi_handler = curl_multi_init();
-  $paths = array();
-  $items = array();
-  while (--$n && ($item = $queue->claimPageItem())) {
-    if (empty($item)) {
-      return TRUE;
-    }
-    $paths[] = $item->object_id;
-    $items[$item->object_id] = $item;
-  }
-  // Iterate each of the URLs on the queue.
-  foreach ($paths as $path) {
-    $ch = curl_init();
-    // Add the URL, user-agent, etc.
-    $curl_options = variable_get('redis_ssi_curl_options', array());
-    $curl_options += array(
-      CURLOPT_URL => url(variable_get('redis_regen_cache') . $path, array('external' => TRUE)),
-      // We should never cache the content of a redirect because redirects are cached elsewhere.
-      CURLOPT_FOLLOWLOCATION => variable_get('player_cache_curlopt_followlocation', FALSE),
-      CURLOPT_RETURNTRANSFER => 1,
-      CURLOPT_USERAGENT => REDIS_SSI_USER_AGENT,
-    );
-    curl_setopt_array($ch, $curl_options);
-
-    // Add the handler to a multi-exec handler.
-    curl_multi_add_handle($curl_multi_handler, $ch);
-
-    // Track the handler so it can be subsequently closed.
-    $curl_handlers[] = curl_init();
-  }
-
-  // Now the curl multi-handler is prepared, execute the requests.
-  do {
-    // This loop is only necessary for libcurl earlier than 7.20.0, however
-    // RHEL 5 has just that. Otherwise a simple call would do.
-    do {
-      // This loop can take a long time so return if it is exceeding the pcq total timeout.
-      if (time() - REQUEST_TIME > drush_get_option('timeout', 55)) {
-        watchdog('PCQ Regen', 'Timeout for PCQ exceeded in curl multi exec.', array(), WATCHDOG_WARNING);
-        return TRUE;
-      }
-      $multi_result = curl_multi_exec($curl_multi_handler, $active);
-    } while ($multi_result == CURLM_CALL_MULTI_PERFORM);
-
-    // Block until there is  activity on any of the handlers. Avoids
-    // busywaiting.
-    if ($multi_result == CURLM_OK) {
-      $select_result = curl_multi_select($curl_multi_handler);
-    }
-
-    if ($multi_result != CURLM_OK || $select_result == -1) {
-      // @TODO: error handling. Something truly awkward happened.
-      return FALSE;
-    }
-  } while ($select_result != -1 && $active && $multi_result == CURLM_OK);
-
-  // Each of the curl requests have completed; log the results.
-  while ($ch_response = curl_multi_info_read($curl_multi_handler)) {
-    // Look up the page URL from the handle.
-    $page_url = curl_getinfo($ch_response['handle'], CURLINFO_EFFECTIVE_URL);
-    $http_code = curl_getinfo($ch_response['handle'], CURLINFO_HTTP_CODE);
-    if ($ch_response['result'] == CURLE_OK) {
-      if (intval($http_code) != 200) {
-        redis_misc_release_item($queue, $items, $page_url);
-      }
-      // No need to use t(); it's handled within the watchdog call.
-      $message = 'Regen request successful for %page_url.';
-      $watchdog_severity = WATCHDOG_DEBUG;
-    }
-    else {
-      redis_misc_release_item($queue, $items, $page_url);
-      $message = 'Curl request failed for %page_url with curl error-code @curl_response_code.';
-      $watchdog_severity = WATCHDOG_WARNING;
-    }
-  }
-
-  // Close all the curl handlers.
-  foreach ($curl_handlers as $curl_handler) {
-    curl_multi_remove_handle($curl_multi_handler, $curl_handler);
-    curl_close($curl_handler);
-  }
-  curl_multi_close($curl_multi_handler);
-
-  foreach ($items as $item) {
-    $queue->deleteItem($item);
-  }
-  return $paths;
-}
-
-
-function redis_misc_release_item($queue, &$items, $path_url) {
-  $path_url = drupal_substr($path_url, drupal_strlen(url(variable_get('redis_misc_cache'))));
-  foreach ($items as $item) {
-    if ($item->object_id == $path_url) {
-      $queue->releaseItem($item);
-      unset($items[$item->object_id]);
-      break;
-    }
-  }
-}
-
+/**
+ * Implements hook_preprocess_node().
+ */
 function redis_misc_entity_info_alter(&$entity_info) {
   $entity_info['node']['view modes']['news_item'] = array(
     'label' => t('News Item'),
@@ -191,7 +93,10 @@ function redis_misc_preprocess_node(&$vars) {
   }
 }
 
-function redis_misc_news_page() {
+/**
+ * Load the new listing page.
+ */
+function redis_misc_news_list_page() {
   $results = db_select('node', 'n')
     ->fields('n', array('nid'))
     ->condition('n.type', 'news')
@@ -227,6 +132,9 @@ function redis_misc_load_fragment($entity_id, $view_type, $regen = TRUE) {
   return $fragment;
 }
 
+/**
+ * Load a new item page.
+ */
 function redis_misc_news_item_page($node) {
   if ($node->type == 'news') {
     $type = $node->field_news_type[LANGUAGE_NONE][0]['value'];
@@ -238,13 +146,9 @@ function redis_misc_news_item_page($node) {
     return drupal_render($build);
   }
 }
-
-function redis_misc_test() {
-  $node = node_load(414);
-  $build = node_view($node, 'news_feed_item');
-  return drupal_render($build);
-}
-
+/**
+ * Implement hook_feeds_after_import to process the news fragments after import.
+ */
 function redis_misc_feeds_after_import($feed) {
   switch ($feed->id) {
     case 'news_feed_bbc':
@@ -262,6 +166,9 @@ function redis_misc_feeds_after_import($feed) {
   }
 }
 
+/**
+ * Get a segment from redis or load/regen it.
+ */
 function redis_misc_get_segment($type, $regen = FALSE) {
   $segment = '';
   if (variable_get('redis_ssi_disable', FALSE)) {
@@ -279,6 +186,9 @@ function redis_misc_get_segment($type, $regen = FALSE) {
   return $segment;
 }
 
+/**
+ * Load segment by regenerating it.
+ */
 function redis_misc_load_segment($type) {
   $news_item_nids = redis_misc_load_segment_sql($type, 5);
   foreach($news_item_nids as $nid) {
@@ -290,6 +200,9 @@ function redis_misc_load_segment($type) {
   return theme('item_list', array('items' => $fragments));
 }
 
+/**
+ * Sql for loading a news item.
+ */
 function redis_misc_load_segment_sql($type, $range) {
   return db_select('node', 'n')
     ->fields('n', array('nid'))
@@ -300,11 +213,18 @@ function redis_misc_load_segment_sql($type, $range) {
     ->fetchCol();
 }
 
+/**
+ * save a segement to redis.
+ */
 function redis_misc_save_segment($type, $segment) {
   redis_ssi_client()->hset('segment', $type, $segment);
 }
 
+/**
+ * Process an individual news type and regen its segemnt and update the news item.
+ */
 function redis_misc_feed_process_news($type) {
+error_log('redis_misc_feed_process_news='.$type);
   redis_misc_get_segment($type, TRUE);
 
   $nid = db_select('field_data_field_news_type', 'f')
@@ -316,11 +236,15 @@ function redis_misc_feed_process_news($type) {
   $news_node = node_load($nid);
   $news_item_nids = redis_misc_load_segment_sql($type, 3);
   $body = redis_misc_news_list_segment($news_item_nids);
+error_log('body='.print_r($body,1));
   $news_node->body[LANGUAGE_NONE][0]['value'] = $body;
   node_save($news_node);
   redis_ssi_instantly_regenerate_page('/news/news');
 }
 
+/**
+ * Generate the segement for teh news page.
+ */
 function redis_misc_news_list_segment($news_item_nids) {
   foreach($news_item_nids as $nid) {
     $fragments[] = array(
