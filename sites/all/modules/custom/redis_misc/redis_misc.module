@@ -150,6 +150,7 @@ function redis_misc_news_item_page($node) {
  * Implement hook_feeds_after_import to process the news fragments after import.
  */
 function redis_misc_feeds_after_import($feed) {
+error_log('redis_misc_feeds_after_import='.print_r($feed,1));
   switch ($feed->id) {
     case 'news_feed_bbc':
       redis_misc_feed_process_news('news_item_bbc');
@@ -170,6 +171,7 @@ function redis_misc_feeds_after_import($feed) {
  * Get a segment from redis or load/regen it.
  */
 function redis_misc_get_segment($type, $regen = FALSE) {
+error_log('redis_misc_get_segment='.print_r($type,1));
   $segment = '';
   if (variable_get('redis_ssi_disable', FALSE)) {
     $segment = redis_misc_load_segment($type);
@@ -180,7 +182,7 @@ function redis_misc_get_segment($type, $regen = FALSE) {
       redis_misc_save_segment($type, $segment);
     }
     else {
-      $segment = redis_ssi_client()->hget('segment', "$type");
+      $segment = redis_ssi_client()->hget('segment', $type);
     }
   }
   return $segment;
@@ -224,7 +226,6 @@ function redis_misc_save_segment($type, $segment) {
  * Process an individual news type and regen its segemnt and update the news item.
  */
 function redis_misc_feed_process_news($type) {
-error_log('redis_misc_feed_process_news='.$type);
   redis_misc_get_segment($type, TRUE);
 
   $nid = db_select('field_data_field_news_type', 'f')
@@ -236,14 +237,13 @@ error_log('redis_misc_feed_process_news='.$type);
   $news_node = node_load($nid);
   $news_item_nids = redis_misc_load_segment_sql($type, 3);
   $body = redis_misc_news_list_segment($news_item_nids);
-error_log('body='.print_r($body,1));
   $news_node->body[LANGUAGE_NONE][0]['value'] = $body;
   node_save($news_node);
   redis_ssi_instantly_regenerate_page('/news/news');
 }
 
 /**
- * Generate the segement for teh news page.
+ * Generate the segement for the news page.
  */
 function redis_misc_news_list_segment($news_item_nids) {
   foreach($news_item_nids as $nid) {
@@ -253,4 +253,29 @@ function redis_misc_news_list_segment($news_item_nids) {
     );
   }
   return theme('item_list', array('items' => $fragments));
+}
+
+function redis_misc_twitter_feed() {
+  if (variable_get('redis_ssi_disable', FALSE)) {
+    $output = '<!--# include virtual="/redis/segment/twitter" -->';
+  }
+  else {
+    $config = twitter_block_get_config('default');
+    $output = redis_misc_load_segment('twitter');
+  }
+  return $output;
+}
+
+function redis_misc_twitter_feed_regen() {
+  $config = twitter_block_get_config('default');
+  $segment = redis_misc_load_segment('twitter');
+  redis_misc_save_segment('twitter', $segment);
+}
+
+function redis_misc_page_alter(&$page) {
+  $page['sidebar_second'] = array(
+    'twitter_block_default' => array(
+      '#markup' => redis_misc_twitter_feed(),
+    ),
+  );
 }
