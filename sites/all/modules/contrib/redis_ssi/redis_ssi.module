@@ -173,6 +173,7 @@ function redis_ssi_client($volatile = FALSE, $ignore_settings = FALSE) {
  *  The path to regenerate.
  */
 function redis_ssi_instantly_regenerate_page($path) {
+error_log('redis_ssi_instantly_regenerate_page='. $path);
   if (variable_get('redis_ssi_disable', FALSE)) {
     return;
   }
